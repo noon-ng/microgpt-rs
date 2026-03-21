@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::Hash;
-use std::ops::Add;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::rc::Rc;
 
 struct ValueInner {
@@ -16,6 +16,7 @@ struct ValueInner {
 #[derive(Clone)]
 struct Value(Rc<RefCell<ValueInner>>);
 
+#[allow(clippy::mutable_key_type, dead_code)]
 impl Value {
     pub fn new(data: f64, children: Vec<Value>, local_grads: Vec<f64>) -> Value {
         Value(Rc::new(RefCell::new(ValueInner {
@@ -30,7 +31,10 @@ impl Value {
         self.0.borrow().data
     }
 
-    #[allow(clippy::mutable_key_type)]
+    pub fn grad(&self) -> f64 {
+        self.0.borrow().grad
+    }
+
     pub fn backward(&self) {
         let mut topology: Vec<Value> = Vec::new();
         let mut visited: HashSet<Value> = HashSet::new();
@@ -65,6 +69,38 @@ impl Value {
             topology.push(self.clone());
         }
     }
+
+    pub fn pow(self, exponent: f64) -> Self {
+        Value::new(
+            self.data().powf(exponent),
+            vec![self.clone()],
+            vec![exponent * self.data().powf(exponent - 1.0)],
+        )
+    }
+
+    pub fn log(self) -> Self {
+        Value::new(
+            self.data().ln(),
+            vec![self.clone()],
+            vec![1.0 / self.data()],
+        )
+    }
+
+    pub fn exp(self) -> Self {
+        Value::new(
+            self.data().exp(),
+            vec![self.clone()],
+            vec![self.data().exp()],
+        )
+    }
+
+    pub fn relu(self) -> Self {
+        Value::new(
+            f64::max(0.0, self.data()),
+            vec![self.clone()],
+            vec![if self.data() > 0.0 { 1.0 } else { 0.0 }],
+        )
+    }
 }
 
 impl Add for Value {
@@ -76,6 +112,86 @@ impl Add for Value {
             vec![self, other],
             vec![1.0, 1.0],
         )
+    }
+}
+
+impl Add<f64> for Value {
+    type Output = Value;
+
+    fn add(self, other: f64) -> Self::Output {
+        let other: Value = Value::new(other, vec![], vec![]);
+
+        self + other
+    }
+}
+
+impl Mul for Value {
+    type Output = Value;
+
+    fn mul(self, other: Self) -> Self::Output {
+        Value::new(
+            self.data() * other.data(),
+            vec![self.clone(), other.clone()],
+            vec![other.data(), self.data()],
+        )
+    }
+}
+
+impl Mul<f64> for Value {
+    type Output = Value;
+
+    fn mul(self, other: f64) -> Self::Output {
+        let other: Value = Value::new(other, vec![], vec![]);
+
+        self * other
+    }
+}
+
+impl Mul<Value> for f64 {
+    type Output = Value;
+
+    fn mul(self, other: Value) -> Self::Output {
+        other * self
+    }
+}
+
+impl Neg for Value {
+    type Output = Value;
+
+    fn neg(self) -> Self::Output {
+        self * -1.0
+    }
+}
+
+impl Sub for Value {
+    type Output = Value;
+
+    fn sub(self, other: Self) -> Self::Output {
+        self + -other
+    }
+}
+
+impl Sub<f64> for Value {
+    type Output = Value;
+
+    fn sub(self, other: f64) -> Self::Output {
+        self + -other
+    }
+}
+
+impl Div for Value {
+    type Output = Value;
+
+    fn div(self, other: Self) -> Self::Output {
+        self * other.pow(-1.0)
+    }
+}
+
+impl Div<f64> for Value {
+    type Output = Value;
+
+    fn div(self, other: f64) -> Self::Output {
+        self * (1.0 / other)
     }
 }
 
@@ -118,19 +234,19 @@ fn main() {
     let c = a.clone() + b.clone();
 
     println!("a.data(): {}", a.data());
-    println!("a.grad(): {}", a.0.borrow().grad);
+    println!("a.grad(): {}", a.grad());
     println!("b.data(): {}", b.data());
-    println!("b.grad(): {}", b.0.borrow().grad);
+    println!("b.grad(): {}", b.grad());
     println!("c.data(): {}", c.data());
-    println!("c.grad(): {}", c.0.borrow().grad);
+    println!("c.grad(): {}", c.grad());
 
     println!("running backprop...");
     c.backward();
 
     println!("a.data(): {}", a.data());
-    println!("a.grad(): {}", a.0.borrow().grad);
+    println!("a.grad(): {}", a.grad());
     println!("b.data(): {}", b.data());
-    println!("b.grad(): {}", b.0.borrow().grad);
+    println!("b.grad(): {}", b.grad());
     println!("c.data(): {}", c.data());
-    println!("c.grad(): {}", c.0.borrow().grad);
+    println!("c.grad(): {}", c.grad());
 }
