@@ -1,4 +1,5 @@
 use rand::prelude::*;
+use rand_distr::Normal;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fs;
@@ -209,6 +210,101 @@ impl Hash for Value {
     }
 }
 
+type Matrix = Vec<Vec<Value>>;
+
+fn randomize(rows: u8, cols: u8) -> Matrix {
+    let std_dev: f64 = 0.08;
+
+    (0..rows)
+        .map(|_| {
+            (0..cols)
+                .map(|_| {
+                    Value::new(
+                        Normal::new(0.0, std_dev).unwrap().sample(&mut rand::rng()),
+                        vec![],
+                        vec![],
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct Layer {
+    query_weights: Matrix,
+    key_weights: Matrix,
+    value_weights: Matrix,
+    output_weights: Matrix,
+    mlp_fc1: Matrix,
+    mlp_fc2: Matrix,
+}
+
+impl Layer {
+    pub fn params(&self) -> Vec<Value> {
+        vec![
+            self.query_weights
+                .clone()
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>(),
+            self.key_weights.clone().into_iter().flatten().collect(),
+            self.value_weights.clone().into_iter().flatten().collect(),
+            self.output_weights.clone().into_iter().flatten().collect(),
+            self.mlp_fc1.clone().into_iter().flatten().collect(),
+            self.mlp_fc2.clone().into_iter().flatten().collect(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+struct Model {
+    wte: Matrix,
+    wpe: Matrix,
+    lm_head: Matrix,
+    layers: Vec<Layer>,
+}
+
+impl Model {
+    pub fn new(vocab_size: u8, layers: u8, embeddings: u8, block_size: u8) -> Self {
+        Model {
+            wte: randomize(vocab_size, embeddings),
+            wpe: randomize(block_size, embeddings),
+            lm_head: randomize(vocab_size, embeddings),
+            layers: (0..layers)
+                .map(|_| Layer {
+                    query_weights: randomize(embeddings, embeddings),
+                    key_weights: randomize(embeddings, embeddings),
+                    value_weights: randomize(embeddings, embeddings),
+                    output_weights: randomize(embeddings, embeddings),
+                    // TODO: is the number of MLP layers generalizable?
+                    mlp_fc1: randomize(4 * embeddings, embeddings),
+                    mlp_fc2: randomize(embeddings, 4 * embeddings),
+                })
+                .collect(),
+        }
+    }
+
+    pub fn params(&self) -> Vec<Value> {
+        vec![
+            self.wte.clone().into_iter().flatten().collect::<Vec<_>>(),
+            self.wpe.clone().into_iter().flatten().collect(),
+            self.lm_head.clone().into_iter().flatten().collect(),
+            self.layers
+                .clone()
+                .into_iter()
+                .flat_map(|layer| layer.params())
+                .collect(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+}
+
+#[allow(unused_variables)]
 fn main() {
     let mut contents: Vec<String> = fs::read_to_string("../input.txt")
         .unwrap_or("".to_string())
@@ -224,29 +320,10 @@ fn main() {
     uchars.sort();
     uchars.dedup();
 
-    let bos = uchars.len();
+    let bos = uchars.len() as u8;
     let vocab_size = bos + 1;
-
     println!("vocab size: {}", vocab_size);
 
-    let a = Value::new(2.0, Vec::new(), Vec::new());
-    let b = Value::new(3.0, Vec::new(), Vec::new());
-    let c = a.clone() + b.clone();
-
-    println!("a.data(): {}", a.data());
-    println!("a.grad(): {}", a.grad());
-    println!("b.data(): {}", b.data());
-    println!("b.grad(): {}", b.grad());
-    println!("c.data(): {}", c.data());
-    println!("c.grad(): {}", c.grad());
-
-    println!("running backprop...");
-    c.backward();
-
-    println!("a.data(): {}", a.data());
-    println!("a.grad(): {}", a.grad());
-    println!("b.data(): {}", b.data());
-    println!("b.grad(): {}", b.grad());
-    println!("c.data(): {}", c.data());
-    println!("c.grad(): {}", c.grad());
+    let model: Model = Model::new(vocab_size, 1, 16, 16);
+    println!("num params: {}", model.params().len())
 }
