@@ -1,10 +1,10 @@
 use rand::prelude::*;
 use rand_distr::Normal;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hash;
-use std::ops::{Add, Div, Mul, Neg, Sub};
+use std::ops::{Add, Div, Index, Mul, Neg, Sub};
 use std::rc::Rc;
 
 struct ValueInner {
@@ -212,7 +212,7 @@ impl Hash for Value {
 
 type Matrix = Vec<Vec<Value>>;
 
-fn randomize(rows: u8, cols: u8) -> Matrix {
+fn matrix(rows: usize, cols: usize) -> Matrix {
     let std_dev: f64 = 0.08;
 
     (0..rows)
@@ -230,77 +230,98 @@ fn randomize(rows: u8, cols: u8) -> Matrix {
         .collect()
 }
 
-#[derive(Clone)]
-struct Layer {
-    query_weights: Matrix,
-    key_weights: Matrix,
-    value_weights: Matrix,
-    output_weights: Matrix,
-    mlp_fc1: Matrix,
-    mlp_fc2: Matrix,
-}
-
-impl Layer {
-    pub fn params(&self) -> Vec<Value> {
-        vec![
-            self.query_weights
-                .clone()
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>(),
-            self.key_weights.clone().into_iter().flatten().collect(),
-            self.value_weights.clone().into_iter().flatten().collect(),
-            self.output_weights.clone().into_iter().flatten().collect(),
-            self.mlp_fc1.clone().into_iter().flatten().collect(),
-            self.mlp_fc2.clone().into_iter().flatten().collect(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-    }
-}
-
 struct Model {
-    wte: Matrix,
-    wpe: Matrix,
-    lm_head: Matrix,
-    layers: Vec<Layer>,
+    network: HashMap<String, Matrix>,
+    uchars: Vec<char>,
+    block_size: usize,
+    layers: usize,
+    embeddings: usize,
 }
 
 impl Model {
-    pub fn new(vocab_size: u8, layers: u8, embeddings: u8, block_size: u8) -> Self {
+    pub fn new(uchars: Vec<char>, layers: usize, embeddings: usize, block_size: usize) -> Self {
+        let vocab_size = uchars.len() + 1;
+
+        let mut network: HashMap<String, Matrix> = HashMap::from([
+            (String::from("wte"), matrix(vocab_size, embeddings)),
+            (String::from("wpe"), matrix(block_size, embeddings)),
+            (String::from("lm_head"), matrix(vocab_size, embeddings)),
+        ]);
+
+        (0..layers).for_each(|i| {
+            network.insert(
+                format!("layer{}.attn_wq", i),
+                matrix(embeddings, embeddings),
+            );
+
+            network.insert(
+                format!("layer{}.attn_wk", i),
+                matrix(embeddings, embeddings),
+            );
+
+            network.insert(
+                format!("layer{}.attn_wv", i),
+                matrix(embeddings, embeddings),
+            );
+
+            network.insert(
+                format!("layer{}.attn_wo", i),
+                matrix(embeddings, embeddings),
+            );
+
+            network.insert(
+                format!("layer{}.mlp_fc1", i),
+                matrix(4 * embeddings, embeddings),
+            );
+
+            network.insert(
+                format!("layer{}.mlp_fc2", i),
+                matrix(embeddings, 4 * embeddings),
+            );
+        });
+
         Model {
-            wte: randomize(vocab_size, embeddings),
-            wpe: randomize(block_size, embeddings),
-            lm_head: randomize(vocab_size, embeddings),
-            layers: (0..layers)
-                .map(|_| Layer {
-                    query_weights: randomize(embeddings, embeddings),
-                    key_weights: randomize(embeddings, embeddings),
-                    value_weights: randomize(embeddings, embeddings),
-                    output_weights: randomize(embeddings, embeddings),
-                    // TODO: is the number of MLP layers generalizable?
-                    mlp_fc1: randomize(4 * embeddings, embeddings),
-                    mlp_fc2: randomize(embeddings, 4 * embeddings),
-                })
-                .collect(),
+            network,
+            uchars,
+            block_size,
+            layers,
+            embeddings,
         }
     }
 
     pub fn params(&self) -> Vec<Value> {
-        vec![
-            self.wte.clone().into_iter().flatten().collect::<Vec<_>>(),
-            self.wpe.clone().into_iter().flatten().collect(),
-            self.lm_head.clone().into_iter().flatten().collect(),
-            self.layers
-                .clone()
-                .into_iter()
-                .flat_map(|layer| layer.params())
-                .collect(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
+        self.network
+            .clone()
+            .into_values()
+            .flatten()
+            .flatten()
+            .collect()
+    }
+
+    pub fn vocab_size(&self) -> usize {
+        self.bos() + 1
+    }
+
+    fn bos(&self) -> usize {
+        self.uchars.len()
+    }
+
+    fn gpt(
+        &self,
+        token_id: usize,
+        position_id: usize,
+        keys: &Matrix,
+        values: &Matrix,
+    ) -> Vec<usize> {
+        todo!("gpt()")
+    }
+
+    fn softmax(&self, logits: Vec<usize>) -> Vec<f64> {
+        todo!("softmax()")
+    }
+
+    pub fn train(self, steps: usize, documents: Vec<String>) {
+        todo!("train()")
     }
 }
 
@@ -320,10 +341,9 @@ fn main() {
     uchars.sort();
     uchars.dedup();
 
-    let bos = uchars.len() as u8;
-    let vocab_size = bos + 1;
-    println!("vocab size: {}", vocab_size);
+    let model = Model::new(uchars, 1, 16, 16);
+    println!("vocab size: {}", model.vocab_size());
+    println!("num params: {}", model.params().len());
 
-    let model: Model = Model::new(vocab_size, 1, 16, 16);
-    println!("num params: {}", model.params().len())
+    model.train(1000, contents)
 }
