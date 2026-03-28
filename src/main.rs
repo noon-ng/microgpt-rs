@@ -4,7 +4,8 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::Hash;
-use std::ops::{Add, Div, Index, Mul, Neg, Sub};
+use std::io::Write;
+use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::rc::Rc;
 
 struct ValueInner {
@@ -34,6 +35,14 @@ impl Value {
 
     pub fn grad(&self) -> f64 {
         self.0.borrow().grad
+    }
+
+    pub fn sub_data(&mut self, amount: f64) {
+        self.0.borrow_mut().data -= amount
+    }
+
+    pub fn reset_grad(&mut self) {
+        self.0.borrow_mut().grad = 0.0
     }
 
     pub fn backward(&self) {
@@ -236,10 +245,17 @@ struct Model {
     block_size: usize,
     layers: usize,
     embeddings: usize,
+    heads: usize,
 }
 
 impl Model {
-    pub fn new(uchars: Vec<char>, layers: usize, embeddings: usize, block_size: usize) -> Self {
+    pub fn new(
+        uchars: Vec<char>,
+        layers: usize,
+        embeddings: usize,
+        block_size: usize,
+        heads: usize,
+    ) -> Self {
         let vocab_size = uchars.len() + 1;
 
         let mut network: HashMap<String, Matrix> = HashMap::from([
@@ -286,15 +302,15 @@ impl Model {
             block_size,
             layers,
             embeddings,
+            heads,
         }
     }
 
     pub fn params(&self) -> Vec<Value> {
         self.network
-            .clone()
-            .into_values()
-            .flatten()
-            .flatten()
+            .values()
+            .flat_map(|m| m.iter().flatten())
+            .cloned()
             .collect()
     }
 
@@ -306,22 +322,231 @@ impl Model {
         self.uchars.len()
     }
 
+    pub fn train(self, steps: usize, documents: Vec<String>) {
+        let mut params: Vec<Value> = self.params();
+        let mut m = vec![0.0; params.len()];
+        let mut v = vec![0.0; params.len()];
+
+        (0..steps).for_each(|step| {
+            let doc: String = documents[step % documents.len()].to_string();
+
+            let mut tokens: Vec<usize> = Vec::new();
+            tokens.push(self.bos());
+            tokens.append(
+                &mut doc
+                    .chars()
+                    .map(|ch| self.uchars.iter().position(|uc| ch == *uc).unwrap())
+                    .collect(),
+            );
+            tokens.push(self.bos());
+
+            let n = usize::min(self.block_size, tokens.len() - 1);
+
+            let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
+            let mut values: Vec<Matrix> = vec![vec![]; self.layers];
+
+            let losses: Vec<Value> = (0..n)
+                .map(|position_id| {
+                    let probabilities: Vec<Value> = Self::softmax(self.gpt(
+                        tokens[position_id],
+                        position_id,
+                        &mut keys,
+                        &mut values,
+                    ));
+
+                    let target_id: usize = tokens[position_id + 1];
+                    -probabilities[target_id].clone().log()
+                })
+                .collect();
+
+            let loss: Value = losses
+                .iter()
+                .cloned()
+                .reduce(|acc, next| acc + next)
+                .unwrap()
+                / (n as f64);
+
+            loss.backward();
+
+            // learning_rate, beta1, beta2, eps_adam = 0.01, 0.85, 0.99, 1e-8
+            let learning_rate = 0.01;
+            let beta1 = 0.85;
+            let beta2 = 0.99;
+            let eps_adam = 1e-8;
+            let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
+
+            params.iter_mut().enumerate().for_each(|(i, param)| {
+                m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
+                v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
+                let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
+                let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
+
+                param.sub_data(decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam));
+                param.reset_grad();
+            });
+
+            print!(
+                "\rstep {:4} / {:4} | loss {:.4}",
+                step + 1,
+                steps,
+                loss.data()
+            );
+            std::io::stdout().flush().unwrap();
+        })
+    }
+
+    fn softmax(logits: Vec<Value>) -> Vec<Value> {
+        let max_value: f64 = logits
+            .iter()
+            .map(|v| v.data())
+            .max_by(|a, b| a.total_cmp(b))
+            .unwrap();
+
+        let exponentiated: Vec<Value> = logits
+            .iter()
+            .map(|v| (v.clone() - max_value).exp())
+            .collect();
+
+        let total: Value = exponentiated
+            .iter()
+            .cloned()
+            .reduce(|acc, next| acc + next)
+            .unwrap();
+
+        exponentiated
+            .iter()
+            .map(|v| v.clone() / total.clone())
+            .collect()
+    }
+
     fn gpt(
         &self,
         token_id: usize,
         position_id: usize,
-        keys: &Matrix,
-        values: &Matrix,
-    ) -> Vec<usize> {
-        todo!("gpt()")
+        keys: &mut [Matrix],
+        values: &mut [Matrix],
+    ) -> Vec<Value> {
+        let token_embedding = self.network["wte"][token_id].clone();
+        let position_embedding = self.network["wpe"][position_id].clone();
+        let mut x: Vec<Value> = Self::rmsnorm(
+            token_embedding
+                .into_iter()
+                .zip(position_embedding)
+                .map(|(token_value, position_value)| token_value + position_value)
+                .collect(),
+        );
+
+        (0..self.layers).for_each(|layer| {
+            let mut x_residual = x.clone();
+            x = Self::rmsnorm(x.clone());
+
+            let q: Vec<Value> = Self::linear(&x, &self.network[&format!("layer{}.attn_wq", layer)]);
+            let k: Vec<Value> = Self::linear(&x, &self.network[&format!("layer{}.attn_wk", layer)]);
+            let v: Vec<Value> = Self::linear(&x, &self.network[&format!("layer{}.attn_wv", layer)]);
+
+            keys[layer].push(k);
+            values[layer].push(v);
+
+            let x_attention: Vec<Value> = (0..self.heads)
+                .flat_map(|head| {
+                    let head_offset: usize = head * self.head_dim();
+                    let query_at_head = &q[head_offset..head_offset + self.head_dim()];
+                    let key_at_head: Vec<&[Value]> = keys[layer]
+                        .iter()
+                        .map(|key| &key[head_offset..head_offset + self.head_dim()])
+                        .collect();
+                    let value_at_head: Vec<&[Value]> = values[layer]
+                        .iter()
+                        .map(|key| &key[head_offset..head_offset + self.head_dim()])
+                        .collect();
+
+                    let attention_scores = (0..key_at_head.len())
+                        .map(|key_position| {
+                            let dot_product = (0..self.head_dim())
+                                .map(|head_offset| {
+                                    query_at_head[head_offset].clone()
+                                        * key_at_head[key_position][head_offset].clone()
+                                })
+                                .reduce(|acc, next| acc + next)
+                                .unwrap();
+
+                            dot_product / (self.head_dim() as f64).sqrt()
+                        })
+                        .collect();
+
+                    let attention_scores_weighted = Self::softmax(attention_scores);
+                    (0..self.head_dim())
+                        .map(|head_offset| {
+                            (0..value_at_head.len())
+                                .map(|value_position| {
+                                    attention_scores_weighted[value_position].clone()
+                                        * value_at_head[value_position][head_offset].clone()
+                                })
+                                .reduce(|acc, next| acc + next)
+                                .unwrap()
+                        })
+                        .collect::<Vec<Value>>()
+                })
+                .collect();
+
+            x = Self::linear(
+                &x_attention,
+                &self.network[&format!("layer{}.attn_wo", layer)],
+            );
+
+            x = x
+                .iter()
+                .cloned()
+                .zip(x_residual)
+                .map(|(a, b)| a + b)
+                .collect();
+
+            x_residual = x.clone();
+
+            x = Self::rmsnorm(x.clone());
+            x = Self::linear(&x, &self.network[&format!("layer{}.mlp_fc1", layer)]);
+            x = x.iter().cloned().map(|value| value.relu()).collect();
+            x = Self::linear(&x, &self.network[&format!("layer{}.mlp_fc2", layer)]);
+            x = x
+                .iter()
+                .cloned()
+                .zip(x_residual)
+                .map(|(a, b)| a + b)
+                .collect();
+        });
+
+        Self::linear(&x, &self.network["lm_head"])
     }
 
-    fn softmax(&self, logits: Vec<usize>) -> Vec<f64> {
-        todo!("softmax()")
+    fn rmsnorm(values: Vec<Value>) -> Vec<Value> {
+        let ms: Value = values
+            .iter()
+            .map(|v| v.clone().pow(2.0))
+            .reduce(|acc, next| acc + next)
+            .unwrap()
+            / (values.len() as f64);
+        let scale: Value = (ms + 1e-5).pow(-0.5);
+
+        values
+            .into_iter()
+            .map(|v| v.clone() * scale.clone())
+            .collect()
     }
 
-    pub fn train(self, steps: usize, documents: Vec<String>) {
-        todo!("train()")
+    fn linear(x: &[Value], w: &Matrix) -> Vec<Value> {
+        w.iter()
+            .map(|row| {
+                row.iter()
+                    .zip(x.iter())
+                    .map(|(wi, xi)| wi.clone() * xi.clone())
+                    .reduce(|acc, next| acc + next)
+                    .unwrap()
+            })
+            .collect()
+    }
+
+    fn head_dim(&self) -> usize {
+        self.embeddings / self.heads
     }
 }
 
@@ -341,7 +566,7 @@ fn main() {
     uchars.sort();
     uchars.dedup();
 
-    let model = Model::new(uchars, 1, 16, 16);
+    let model = Model::new(uchars, 1, 16, 16, 4);
     println!("vocab size: {}", model.vocab_size());
     println!("num params: {}", model.params().len());
 
