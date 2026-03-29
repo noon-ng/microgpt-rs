@@ -124,15 +124,7 @@ impl Model {
             let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
             let mut values: Vec<Matrix> = vec![vec![]; self.layers];
 
-            let mut tokens: Vec<usize> = Vec::new();
-            tokens.push(self.bos());
-            tokens.append(
-                &mut doc
-                    .chars()
-                    .map(|ch| self.uchars.iter().position(|uc| ch == *uc).unwrap())
-                    .collect(),
-            );
-            tokens.push(self.bos());
+            let tokens = self.tokenize(doc);
 
             let n = usize::min(self.block_size, tokens.len() - 1);
 
@@ -167,7 +159,9 @@ impl Model {
                 let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
                 let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
 
-                param.sub_data(decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam));
+                param.set_data(
+                    param.data() - (decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam)),
+                );
                 param.reset_grad();
             });
 
@@ -181,6 +175,19 @@ impl Model {
         });
 
         println!();
+    }
+
+    fn tokenize(&self, doc: String) -> Vec<usize> {
+        let mut tokens: Vec<usize> = Vec::new();
+        tokens.push(self.bos());
+        tokens.append(
+            &mut doc
+                .chars()
+                .map(|ch| self.uchars.iter().position(|uc| ch == *uc).unwrap())
+                .collect(),
+        );
+        tokens.push(self.bos());
+        tokens
     }
 
     fn softmax(logits: Vec<Value>) -> Vec<Value> {

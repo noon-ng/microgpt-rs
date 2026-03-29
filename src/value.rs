@@ -33,8 +33,8 @@ impl Value {
         self.0.borrow().grad
     }
 
-    pub fn sub_data(&mut self, amount: f64) {
-        self.0.borrow_mut().data -= amount
+    pub fn set_data(&mut self, data: f64) {
+        self.0.borrow_mut().data = data
     }
 
     pub fn reset_grad(&mut self) {
