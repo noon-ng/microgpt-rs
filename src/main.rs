@@ -1,3 +1,4 @@
+use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand_distr::Normal;
 use std::cell::RefCell;
@@ -322,10 +323,14 @@ impl Model {
         self.uchars.len()
     }
 
-    pub fn train(self, steps: usize, documents: Vec<String>) {
+    pub fn train(&self, steps: usize, documents: Vec<String>) {
         let mut params: Vec<Value> = self.params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
+        let learning_rate = 0.01;
+        let beta1 = 0.85;
+        let beta2 = 0.99;
+        let eps_adam = 1e-8;
 
         (0..steps).for_each(|step| {
             let doc: String = documents[step % documents.len()].to_string();
@@ -342,17 +347,10 @@ impl Model {
 
             let n = usize::min(self.block_size, tokens.len() - 1);
 
-            let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
-            let mut values: Vec<Matrix> = vec![vec![]; self.layers];
-
             let losses: Vec<Value> = (0..n)
                 .map(|position_id| {
-                    let probabilities: Vec<Value> = Self::softmax(self.gpt(
-                        tokens[position_id],
-                        position_id,
-                        &mut keys,
-                        &mut values,
-                    ));
+                    let probabilities: Vec<Value> =
+                        Self::softmax(self.gpt(tokens[position_id], position_id));
 
                     let target_id: usize = tokens[position_id + 1];
                     -probabilities[target_id].clone().log()
@@ -368,11 +366,6 @@ impl Model {
 
             loss.backward();
 
-            // learning_rate, beta1, beta2, eps_adam = 0.01, 0.85, 0.99, 1e-8
-            let learning_rate = 0.01;
-            let beta1 = 0.85;
-            let beta2 = 0.99;
-            let eps_adam = 1e-8;
             let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
 
             params.iter_mut().enumerate().for_each(|(i, param)| {
@@ -392,7 +385,9 @@ impl Model {
                 loss.data()
             );
             std::io::stdout().flush().unwrap();
-        })
+        });
+
+        println!();
     }
 
     fn softmax(logits: Vec<Value>) -> Vec<Value> {
@@ -419,13 +414,7 @@ impl Model {
             .collect()
     }
 
-    fn gpt(
-        &self,
-        token_id: usize,
-        position_id: usize,
-        keys: &mut [Matrix],
-        values: &mut [Matrix],
-    ) -> Vec<Value> {
+    fn gpt(&self, token_id: usize, position_id: usize) -> Vec<Value> {
         let token_embedding = self.network["wte"][token_id].clone();
         let position_embedding = self.network["wpe"][position_id].clone();
         let mut x: Vec<Value> = Self::rmsnorm(
@@ -435,6 +424,9 @@ impl Model {
                 .map(|(token_value, position_value)| token_value + position_value)
                 .collect(),
         );
+
+        let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
+        let mut values: Vec<Matrix> = vec![vec![]; self.layers];
 
         (0..self.layers).for_each(|layer| {
             let mut x_residual = x.clone();
@@ -548,6 +540,40 @@ impl Model {
     fn head_dim(&self) -> usize {
         self.embeddings / self.heads
     }
+
+    pub fn hallucinate(&self, temperature: f64, samples: usize) -> Vec<String> {
+        (0..samples)
+            .map(|_| {
+                let mut token_id = self.bos();
+
+                (0..self.block_size)
+                    .map_while(|position_id| {
+                        let logits = self.gpt(token_id, position_id);
+                        let probabilities = Self::softmax(
+                            logits
+                                .into_iter()
+                                .map(|logit| logit / temperature)
+                                .collect(),
+                        );
+
+                        let dist: WeightedIndex<f64> = WeightedIndex::new(
+                            probabilities.iter().map(|probability| probability.data()),
+                        )
+                        .unwrap();
+
+                        token_id = (0..self.vocab_size()).collect::<Vec<usize>>()
+                            [dist.sample(&mut rand::rng())];
+
+                        if token_id == self.bos() {
+                            None
+                        } else {
+                            Some(self.uchars[token_id])
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
 }
 
 #[allow(unused_variables)]
@@ -570,5 +596,11 @@ fn main() {
     println!("vocab size: {}", model.vocab_size());
     println!("num params: {}", model.params().len());
 
-    model.train(1000, contents)
+    model.train(1000, contents);
+
+    println!("--- inference (new, hallucinated names) ---");
+
+    for (index, sample) in model.hallucinate(0.5, 20).iter().enumerate() {
+        println!("sample {:4}: {}", index, sample);
+    }
 }
