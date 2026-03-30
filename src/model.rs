@@ -1,8 +1,11 @@
 use rand::distr::weighted::WeightedIndex;
 use rand::prelude::*;
 use rand_distr::Normal;
-use std::collections::HashMap;
-use std::io::Write;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs::{self, File};
+use std::io::{BufReader, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::value::Value;
 
@@ -27,12 +30,22 @@ fn matrix(rows: usize, cols: usize) -> Matrix {
 }
 
 pub struct Model {
-    network: HashMap<String, Matrix>,
+    network: BTreeMap<String, Matrix>,
     uchars: Vec<char>,
     block_size: usize,
     layers: usize,
     embeddings: usize,
     heads: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Checkpoint {
+    uchars: Vec<char>,
+    block_size: usize,
+    layers: usize,
+    embeddings: usize,
+    heads: usize,
+    params: Vec<f64>,
 }
 
 impl Model {
@@ -45,7 +58,7 @@ impl Model {
     ) -> Self {
         let vocab_size = uchars.len() + 1;
 
-        let mut network: HashMap<String, Matrix> = HashMap::from([
+        let mut network: BTreeMap<String, Matrix> = BTreeMap::from([
             (String::from("wte"), matrix(vocab_size, embeddings)),
             (String::from("wpe"), matrix(block_size, embeddings)),
             (String::from("lm_head"), matrix(vocab_size, embeddings)),
@@ -109,7 +122,7 @@ impl Model {
         self.uchars.len()
     }
 
-    pub fn train(&self, steps: usize, documents: Vec<String>) {
+    pub fn train(&self, steps: usize, documents: Vec<String>, should_stop: &AtomicBool) {
         let mut params: Vec<Value> = self.params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
@@ -118,61 +131,70 @@ impl Model {
         let beta2 = 0.99;
         let eps_adam = 1e-8;
 
-        (0..steps).for_each(|step| {
-            let doc: String = documents[step % documents.len()].to_string();
+        let _ = (0..steps)
+            .map_while(|step| {
+                let doc: String = documents[step % documents.len()].to_string();
 
-            let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
-            let mut values: Vec<Matrix> = vec![vec![]; self.layers];
+                let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
+                let mut values: Vec<Matrix> = vec![vec![]; self.layers];
 
-            let tokens = self.tokenize(doc);
+                let tokens = self.tokenize(doc);
 
-            let n = usize::min(self.block_size, tokens.len() - 1);
+                let n = usize::min(self.block_size, tokens.len() - 1);
 
-            let losses: Vec<Value> = (0..n)
-                .map(|position_id| {
-                    let probabilities: Vec<Value> = Self::softmax(self.gpt(
-                        tokens[position_id],
-                        position_id,
-                        &mut keys,
-                        &mut values,
-                    ));
+                let losses: Vec<Value> = (0..n)
+                    .map(|position_id| {
+                        let probabilities: Vec<Value> = Self::softmax(self.gpt(
+                            tokens[position_id],
+                            position_id,
+                            &mut keys,
+                            &mut values,
+                        ));
 
-                    let target_id: usize = tokens[position_id + 1];
-                    -probabilities[target_id].clone().log()
-                })
-                .collect();
+                        let target_id: usize = tokens[position_id + 1];
+                        -probabilities[target_id].clone().log()
+                    })
+                    .collect();
 
-            let loss: Value = losses
-                .iter()
-                .cloned()
-                .reduce(|acc, next| acc + next)
-                .unwrap()
-                / (n as f64);
+                let loss: Value = losses
+                    .iter()
+                    .cloned()
+                    .reduce(|acc, next| acc + next)
+                    .unwrap()
+                    / (n as f64);
 
-            loss.backward();
+                loss.backward();
 
-            let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
+                let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
 
-            params.iter_mut().enumerate().for_each(|(i, param)| {
-                m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
-                v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
-                let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
-                let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
+                params.iter_mut().enumerate().for_each(|(i, param)| {
+                    m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
+                    v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
+                    let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
+                    let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
 
-                param.set_data(
-                    param.data() - (decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam)),
+                    param.set_data(
+                        param.data()
+                            - (decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam)),
+                    );
+                    param.reset_grad();
+                });
+
+                print!(
+                    "\rstep {:4} / {:4} | loss {:.4}",
+                    step + 1,
+                    steps,
+                    loss.data()
                 );
-                param.reset_grad();
-            });
+                std::io::stdout().flush().unwrap();
 
-            print!(
-                "\rstep {:4} / {:4} | loss {:.4}",
-                step + 1,
-                steps,
-                loss.data()
-            );
-            std::io::stdout().flush().unwrap();
-        });
+                if should_stop.load(Ordering::Relaxed) {
+                    None
+                } else {
+                    Some(())
+                }
+            })
+            .collect::<Vec<_>>();
 
         println!();
     }
@@ -352,14 +374,20 @@ impl Model {
                 let mut values: Vec<Matrix> = vec![vec![]; self.layers];
 
                 (0..self.block_size)
-                    .map_while(|position_id| {
+                    .enumerate()
+                    .map_while(|(index, position_id)| {
                         let logits = self.gpt(token_id, position_id, &mut keys, &mut values);
-                        let probabilities = Self::softmax(
+                        let mut probabilities = Self::softmax(
                             logits
                                 .into_iter()
                                 .map(|logit| logit / temperature)
                                 .collect(),
                         );
+
+                        // Prevent empty sequences
+                        if index == 0 {
+                            probabilities[self.bos()].set_data(0.0)
+                        }
 
                         let dist: WeightedIndex<f64> = WeightedIndex::new(
                             probabilities.iter().map(|probability| probability.data()),
@@ -378,5 +406,41 @@ impl Model {
                     .collect()
             })
             .collect()
+    }
+
+    pub fn save(&self, path: &str) -> Result<(), std::io::Error> {
+        fs::write(
+            path,
+            serde_json::to_string(&Checkpoint {
+                uchars: self.uchars.clone(),
+                block_size: self.block_size,
+                layers: self.layers,
+                embeddings: self.embeddings,
+                heads: self.heads,
+                params: self.params().iter().map(|v| v.data()).collect(),
+            })
+            .unwrap(),
+        )
+    }
+
+    pub fn load(path: &str) -> Result<Self, std::io::Error> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        let checkpoint = serde_json::from_reader::<_, Checkpoint>(reader)?;
+        let model = Self::new(
+            checkpoint.uchars,
+            checkpoint.layers,
+            checkpoint.embeddings,
+            checkpoint.block_size,
+            checkpoint.heads,
+        );
+
+        model
+            .params()
+            .into_iter()
+            .zip(checkpoint.params)
+            .for_each(|(mut param, value)| param.set_data(value));
+
+        Ok(model)
     }
 }
