@@ -2,10 +2,10 @@ mod model;
 mod value;
 
 use clap::Parser;
-use ctrlc;
 use model::Model;
 use rand::prelude::*;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 #[derive(Parser)]
@@ -56,6 +56,7 @@ fn main() {
             model
         } else {
             let model = train(&args);
+            println!();
             println!("saving checkpoint to {}", path);
             model.save(path).expect("failed to save checkpoint");
             model
@@ -64,6 +65,7 @@ fn main() {
         train(&args)
     };
 
+    println!();
     println!("--- inference (new, hallucinated names) ---");
 
     for (index, sample) in model
@@ -76,18 +78,44 @@ fn main() {
 }
 
 fn train(args: &Args) -> Model {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::Ordering;
 
-    let should_stop = Arc::new(AtomicBool::new(false));
-    let stop_flag = should_stop.clone();
+    let should_stop = setup_ctrlc_handler();
+    let (contents, uchars) = import_training_set("../input.txt");
 
-    ctrlc::set_handler(move || {
-        stop_flag.store(true, Ordering::Relaxed);
-    })
-    .expect("failed to set ctrl-c handler");
+    let model = Model::new(
+        uchars,
+        args.layers,
+        args.embeddings,
+        args.block_size,
+        args.heads,
+    );
+    println!("vocab size: {}", model.vocab_size());
+    println!("num params: {}", model.params().len());
 
-    let mut contents: Vec<String> = fs::read_to_string("../input.txt")
+    let steps = args.steps;
+
+    let _ = model
+        .train(args.steps, contents)
+        .inspect(|(step, loss)| {
+            print!("\rstep {step:4} / {steps:4} | loss {loss:.4}",);
+            std::io::stdout().flush().unwrap();
+        })
+        // .inspect(|(step, loss)| {})
+        .map_while(|_| {
+            if should_stop.load(Ordering::Relaxed) {
+                None
+            } else {
+                Some(())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    model
+}
+
+fn import_training_set(filename: &str) -> (Vec<String>, Vec<char>) {
+    let mut contents: Vec<String> = fs::read_to_string(filename)
         .unwrap_or("".to_string())
         .lines()
         .map(|line| line.trim().to_string())
@@ -101,17 +129,21 @@ fn train(args: &Args) -> Model {
     uchars.sort();
     uchars.dedup();
 
-    let model = Model::new(
-        uchars,
-        args.layers,
-        args.embeddings,
-        args.block_size,
-        args.heads,
-    );
-    println!("vocab size: {}", model.vocab_size());
-    println!("num params: {}", model.params().len());
+    (contents, uchars)
+}
 
-    model.train(args.steps, contents, &should_stop);
+fn setup_ctrlc_handler() -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let stop_flag = should_stop.clone();
 
-    model
+    ctrlc::set_handler(move || {
+        stop_flag.store(true, Ordering::Relaxed);
+    })
+    .expect("failed to set ctrl-c handler");
+
+    should_stop
 }

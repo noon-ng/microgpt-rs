@@ -4,8 +4,7 @@ use rand_distr::Normal;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, File};
-use std::io::{BufReader, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::io::BufReader;
 
 use crate::value::Value;
 
@@ -122,7 +121,11 @@ impl Model {
         self.uchars.len()
     }
 
-    pub fn train(&self, steps: usize, documents: Vec<String>, should_stop: &AtomicBool) {
+    pub fn train(
+        &self,
+        steps: usize,
+        documents: Vec<String>,
+    ) -> impl Iterator<Item = (usize, f64)> {
         let mut params: Vec<Value> = self.params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
@@ -131,72 +134,55 @@ impl Model {
         let beta2 = 0.99;
         let eps_adam = 1e-8;
 
-        let _ = (0..steps)
-            .map_while(|step| {
-                let doc: String = documents[step % documents.len()].to_string();
+        (0..steps).map(move |step| {
+            let doc: String = documents[step % documents.len()].to_string();
 
-                let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
-                let mut values: Vec<Matrix> = vec![vec![]; self.layers];
+            let mut keys: Vec<Matrix> = vec![vec![]; self.layers];
+            let mut values: Vec<Matrix> = vec![vec![]; self.layers];
 
-                let tokens = self.tokenize(doc);
+            let tokens = self.tokenize(doc);
 
-                let n = usize::min(self.block_size, tokens.len() - 1);
+            let n = usize::min(self.block_size, tokens.len() - 1);
 
-                let losses: Vec<Value> = (0..n)
-                    .map(|position_id| {
-                        let probabilities: Vec<Value> = Self::softmax(self.gpt(
-                            tokens[position_id],
-                            position_id,
-                            &mut keys,
-                            &mut values,
-                        ));
+            let losses: Vec<Value> = (0..n)
+                .map(|position_id| {
+                    let probabilities: Vec<Value> = Self::softmax(self.gpt(
+                        tokens[position_id],
+                        position_id,
+                        &mut keys,
+                        &mut values,
+                    ));
 
-                        let target_id: usize = tokens[position_id + 1];
-                        -probabilities[target_id].clone().log()
-                    })
-                    .collect();
+                    let target_id: usize = tokens[position_id + 1];
+                    -probabilities[target_id].clone().log()
+                })
+                .collect();
 
-                let loss: Value = losses
-                    .iter()
-                    .cloned()
-                    .reduce(|acc, next| acc + next)
-                    .unwrap()
-                    / (n as f64);
+            let loss: Value = losses
+                .iter()
+                .cloned()
+                .reduce(|acc, next| acc + next)
+                .unwrap()
+                / (n as f64);
 
-                loss.backward();
+            loss.backward();
 
-                let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
+            let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
 
-                params.iter_mut().enumerate().for_each(|(i, param)| {
-                    m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
-                    v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
-                    let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
-                    let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
+            params.iter_mut().enumerate().for_each(|(i, param)| {
+                m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
+                v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
+                let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
+                let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
 
-                    param.set_data(
-                        param.data()
-                            - (decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam)),
-                    );
-                    param.reset_grad();
-                });
-
-                print!(
-                    "\rstep {:4} / {:4} | loss {:.4}",
-                    step + 1,
-                    steps,
-                    loss.data()
+                param.set_data(
+                    param.data() - (decayed_learning_rate * m_hat / (v_hat.powf(0.5) + eps_adam)),
                 );
-                std::io::stdout().flush().unwrap();
+                param.reset_grad();
+            });
 
-                if should_stop.load(Ordering::Relaxed) {
-                    None
-                } else {
-                    Some(())
-                }
-            })
-            .collect::<Vec<_>>();
-
-        println!();
+            (step, loss.data())
+        })
     }
 
     fn tokenize(&self, doc: String) -> Vec<usize> {
