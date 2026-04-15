@@ -42,13 +42,11 @@ impl Value {
     }
 
     pub fn backward(&self) {
-        let mut topology: Vec<Value> = Vec::new();
-        let mut visited: HashSet<Value> = HashSet::new();
-        self.build_topology(&mut topology, &mut visited);
+        let topological_sort = self.build_topological_sort();
 
         self.0.borrow_mut().grad = 1.0;
 
-        for value in topology.iter().rev() {
+        for value in topological_sort.iter().rev() {
             let (value_grad, children, local_grads) = {
                 let inner = value.0.borrow();
                 (
@@ -64,16 +62,26 @@ impl Value {
         }
     }
 
-    fn build_topology(&self, topology: &mut Vec<Value>, visited: &mut HashSet<Value>) {
-        if !visited.contains(self) {
-            visited.insert(self.clone());
+    fn build_topological_sort(&self) -> Vec<Value> {
+        let mut topological_sort: Vec<Value> = Vec::new();
+        let mut visited: HashSet<Value> = HashSet::new();
+        let mut stack = vec![(self.clone(), false)];
 
-            for child in &self.0.borrow().children {
-                child.build_topology(topology, visited);
+        while let Some((node, processed)) = stack.pop() {
+            if processed {
+                topological_sort.push(node);
+            } else if !visited.contains(&node) {
+                visited.insert(node.clone());
+
+                stack.push((node.clone(), true));
+
+                for child in &node.0.borrow().children {
+                    stack.push((child.clone(), false));
+                }
             }
-
-            topology.push(self.clone());
         }
+
+        topological_sort
     }
 
     pub fn pow(self, exponent: f64) -> Self {
