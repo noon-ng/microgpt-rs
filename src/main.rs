@@ -12,6 +12,10 @@ use std::path::Path;
 #[derive(Parser)]
 #[command(name = "microgpt-rs", about = "A tiny GPT in Rust")]
 struct Args {
+    // Input file to train model on
+    #[arg(short)]
+    input: String,
+
     /// Checkpoint file (loads if exists, saves after training if not)
     #[arg(short, long)]
     file: Option<String>,
@@ -86,7 +90,7 @@ fn train(args: &Args) -> Model {
     use std::sync::atomic::Ordering;
 
     let should_stop = setup_ctrlc_handler();
-    let (contents, uchars) = import_training_set("../input.txt");
+    let (contents, uchars) = import_training_set(&args.input);
 
     let model = Model::new(
         uchars,
@@ -169,7 +173,7 @@ fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>))
 
 fn import_training_set(filename: &str) -> (Vec<String>, Vec<char>) {
     let mut contents: Vec<String> = fs::read_to_string(filename)
-        .unwrap_or("".to_string())
+        .expect("file not found")
         .lines()
         .map(|line| line.trim().to_string())
         .collect();
