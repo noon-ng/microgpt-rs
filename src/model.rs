@@ -125,7 +125,7 @@ impl Model {
         &self,
         steps: usize,
         documents: Vec<String>,
-    ) -> impl Iterator<Item = (usize, f64)> {
+    ) -> impl Iterator<Item = (usize, f64, Vec<f64>)> {
         let mut params: Vec<Value> = self.params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
@@ -181,7 +181,8 @@ impl Model {
                 param.reset_grad();
             });
 
-            (step, loss.data())
+            let param_values: Vec<f64> = params.iter().map(|p| p.data()).collect();
+            (step, loss.data(), param_values)
         })
     }
 
