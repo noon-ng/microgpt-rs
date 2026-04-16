@@ -7,7 +7,7 @@ A more-or-less literal port of [Andrej Karpathy's microgpt.py](https://karpathy.
 Basic usage is:
 
 ```
-cargo run --release -- -i <input_file> [options]
+cargo run --release -- <input_file> [options]
 ```
 
 Where `<input_file>` is the training set.
@@ -23,13 +23,13 @@ for lang in portuguese english french; do
   curl -s $base/$lang.txt
 done >> words
 
-cargo run --release -- -i words
+cargo run --release -- words
 ```
 
 Output:
 ```
     Finished `release` profile [optimized] target(s) in 0.04s
-     Running `target/release/microgpt-rs -i words`
+     Running `target/release/microgpt-rs words`
 num docs: 1003193
 vocab size: 83
 num params: 5984
@@ -65,7 +65,6 @@ To synthesize a drone from the model weights as it trains, add the `--sonify` fl
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `-i` | Input text file (one document per line) | required |
 | `-f, --file` | Checkpoint path (loads if exists, saves after training) | — |
 | `-s, --steps` | Training steps | 1000 |
 | `-t, --temperature` | Sampling temperature (0.0–1.0) | 0.5 |

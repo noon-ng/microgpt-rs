@@ -2,6 +2,7 @@ mod model;
 mod value;
 
 use clap::Parser;
+use clap::error::ErrorKind;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use model::Model;
 use rand::prelude::*;
@@ -13,7 +14,6 @@ use std::path::Path;
 #[command(name = "microgpt-rs", about = "A tiny GPT in Rust")]
 struct Args {
     // Input file to train model on
-    #[arg(short)]
     input: String,
 
     /// Checkpoint file (loads if exists, saves after training if not)
@@ -25,27 +25,27 @@ struct Args {
     steps: usize,
 
     /// Sampling temperature (0.0-1.0, lower = more conservative)
-    #[arg(short, long, default_value_t = 0.5)]
+    #[arg(short, long, default_value_t = 0.5, value_parser = clap::value_parser!(f64))]
     temperature: f64,
 
     /// Number of names to generate
-    #[arg(short, long, default_value_t = 20)]
+    #[arg(short, long, default_value_t = 20, value_parser = clap::value_parser!(usize))]
     num_samples: usize,
 
     /// Number of transformer layers
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(usize))]
     layers: usize,
 
     /// Embedding dimension
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(usize))]
     embeddings: usize,
 
     /// Maximum context length
-    #[arg(long, default_value_t = 16)]
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(usize))]
     block_size: usize,
 
     /// Number of attention heads
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(usize))]
     heads: usize,
 
     // Sonify training steps
@@ -53,8 +53,70 @@ struct Args {
     sonify: bool,
 }
 
+impl Args {
+    fn validate(self) -> Self {
+        use clap::CommandFactory;
+
+        if self.temperature < 0.0 || self.temperature > 1.0 {
+            Args::command()
+                .error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "--temperature ({}) must be between 0.0 and 1.0",
+                        self.temperature
+                    ),
+                )
+                .exit();
+        }
+
+        if self.num_samples == 0 {
+            Args::command()
+                .error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "--num-samples ({}) must be greater than 0",
+                        self.num_samples
+                    ),
+                )
+                .exit();
+        }
+
+        if self.block_size == 0 {
+            Args::command()
+                .error(
+                    ErrorKind::ValueValidation,
+                    format!("--block-size ({}) must be greater than 0", self.block_size),
+                )
+                .exit();
+        }
+
+        if self.embeddings == 0 {
+            Args::command()
+                .error(
+                    ErrorKind::ValueValidation,
+                    format!("--embeddings ({}) must be greater than 0", self.embeddings),
+                )
+                .exit();
+        }
+
+        if !self.embeddings.is_multiple_of(self.heads) {
+            Args::command()
+                .error(
+                    ErrorKind::ValueValidation,
+                    format!(
+                        "number of --embeddings ({}) must be divisble by --heads ({})",
+                        self.embeddings, self.heads
+                    ),
+                )
+                .exit();
+        }
+
+        self
+    }
+}
+
 fn main() {
-    let args = Args::parse();
+    let args = Args::parse().validate();
 
     let model = if let Some(ref path) = args.file {
         if Path::new(path).exists() {
