@@ -8,6 +8,48 @@ use std::io::BufReader;
 
 use crate::value::Value;
 
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let mut p = pattern.chars().peekable();
+    let mut t = text.chars().peekable();
+
+    while p.peek().is_some() || t.peek().is_some() {
+        match p.peek() {
+            Some('*') => {
+                p.next();
+                if p.peek().is_none() {
+                    return true;
+                }
+                while t.peek().is_some() {
+                    if glob_match(
+                        p.clone().collect::<String>().as_str(),
+                        &t.clone().collect::<String>(),
+                    ) {
+                        return true;
+                    }
+                    t.next();
+                }
+                return false;
+            }
+            Some('?') => {
+                if t.peek().is_none() {
+                    return false;
+                }
+                p.next();
+                t.next();
+            }
+            Some(&pc) => {
+                if t.peek() != Some(&pc) {
+                    return false;
+                }
+                p.next();
+                t.next();
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
 pub type Matrix = Vec<Vec<Value>>;
 
 fn matrix(rows: usize, cols: usize) -> Matrix {
@@ -35,6 +77,7 @@ pub struct Model {
     layers: usize,
     embeddings: usize,
     heads: usize,
+    initial_params: Vec<f64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,14 +138,34 @@ impl Model {
             );
         });
 
-        Model {
+        let mut model = Model {
             network,
             uchars,
             block_size,
             layers,
             embeddings,
             heads,
+            initial_params: vec![],
+        };
+
+        model.initial_params = model.params().iter().map(|p| p.data()).collect();
+
+        model
+    }
+
+    /// Returns param index ranges for matrices matching a glob pattern (? and * wildcards).
+    pub fn param_ranges(&self, pattern: &str) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+        let mut offset = 0;
+        for (key, matrix) in &self.network {
+            let size: usize = matrix.iter().map(|row| row.len()).sum();
+            if glob_match(pattern, key) {
+                ranges.push(offset..offset + size);
+            }
+            offset += size;
         }
+        assert!(!ranges.is_empty(), "no matrices match pattern '{pattern}'");
+        ranges
     }
 
     pub fn params(&self) -> Vec<Value> {
@@ -125,14 +188,14 @@ impl Model {
         &self,
         steps: usize,
         documents: Vec<String>,
+        learning_rate: f64,
+        beta1: f64,
+        beta2: f64,
+        eps_adam: f64,
     ) -> impl Iterator<Item = (usize, f64, Vec<f64>)> {
         let mut params: Vec<Value> = self.params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
-        let learning_rate = 0.01;
-        let beta1 = 0.85;
-        let beta2 = 0.99;
-        let eps_adam = 1e-8;
 
         (0..steps).map(move |step| {
             let doc: String = documents[step % documents.len()].to_string();
@@ -167,11 +230,20 @@ impl Model {
 
             loss.backward();
 
+            // Gradient clipping by global norm
+            let grad_norm = params.iter().map(|p| p.grad().powi(2)).sum::<f64>().sqrt();
+            let clip = if grad_norm > 1.0 {
+                1.0 / grad_norm
+            } else {
+                1.0
+            };
+
             let decayed_learning_rate = learning_rate * (1.0 - step as f64 / steps as f64);
 
             params.iter_mut().enumerate().for_each(|(i, param)| {
-                m[i] = beta1 * m[i] + (1.0 - beta1) * param.grad();
-                v[i] = beta2 * v[i] + (1.0 - beta2) * param.grad().powi(2);
+                let grad = param.grad() * clip;
+                m[i] = beta1 * m[i] + (1.0 - beta1) * grad;
+                v[i] = beta2 * v[i] + (1.0 - beta2) * grad.powi(2);
                 let m_hat = m[i] / (1.0 - beta1.powi(step as i32 + 1));
                 let v_hat = v[i] / (1.0 - beta2.powi(step as i32 + 1));
 
@@ -181,7 +253,12 @@ impl Model {
                 param.reset_grad();
             });
 
-            let param_values: Vec<f64> = params.iter().map(|p| p.data()).collect();
+            let param_values: Vec<(f64, f64)> = params
+                .iter()
+                .zip(self.initial_params.iter())
+                .map(|(p, p_initial)| (p.data(), p_initial - p.data()))
+                .collect();
+
             (step, loss.data(), param_values)
         })
     }

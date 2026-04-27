@@ -48,9 +48,25 @@ struct Args {
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(usize))]
     heads: usize,
 
-    // Sonify training steps
-    #[arg(long, default_value_t = false)]
-    sonify: bool,
+    /// Learning rate
+    #[arg(long, default_value_t = 0.01)]
+    learning_rate: f64,
+
+    /// Adam beta1 (momentum)
+    #[arg(long, default_value_t = 0.85)]
+    beta1: f64,
+
+    /// Adam beta2 (second moment)
+    #[arg(long, default_value_t = 0.99)]
+    beta2: f64,
+
+    /// Adam epsilon
+    #[arg(long, default_value_t = 1e-8)]
+    eps_adam: f64,
+
+    /// Sonify a weight matrix during training (e.g. lm_head, wte, layer0.attn_wq)
+    #[arg(long, default_missing_value = "lm_head", num_args = 0..=1)]
+    sonify: Option<String>,
 }
 
 impl Args {
@@ -136,6 +152,10 @@ fn main() {
         train(&args)
     };
 
+    inference(&model, &args);
+}
+
+fn inference(model: &Model, args: &Args) {
     println!();
     println!("--- inference (new, hallucinated names) ---");
 
@@ -143,9 +163,7 @@ fn main() {
         .hallucinate(args.temperature, args.num_samples)
         .iter()
         .enumerate()
-        .for_each(|(index, sample)| {
-            println!("sample {:4}: {}", index, sample);
-        })
+        .for_each(|(index, sample)| println!("sample {index:4}: {sample}"))
 }
 
 fn train(args: &Args) -> Model {
@@ -164,12 +182,26 @@ fn train(args: &Args) -> Model {
     println!("vocab size: {}", model.vocab_size());
     println!("num params: {}", model.params().len());
 
-    let mut sonification = args.sonify.then(setup_sonifier).flatten();
+    let mut sonification = args.sonify.as_ref().and_then(|layer| {
+        setup_sonifier(
+            layer
+                .split(',')
+                .flat_map(|p| model.param_ranges(p.trim()))
+                .collect(),
+        )
+    });
 
     let steps = args.steps;
 
     let _ = model
-        .train(args.steps, contents)
+        .train(
+            args.steps,
+            contents,
+            args.learning_rate,
+            args.beta1,
+            args.beta2,
+            args.eps_adam,
+        )
         .inspect(|(step, loss, _)| {
             print!("\rstep {step:4} / {steps:4} | loss {loss:.4}");
             std::io::stdout().flush().unwrap();
@@ -191,12 +223,12 @@ fn train(args: &Args) -> Model {
     model
 }
 
-fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>)))> {
+fn setup_sonifier(
+    param_ranges: Vec<std::ops::Range<usize>>,
+) -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<(f64, f64)>)))> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let device = cpal::default_host().default_output_device()?;
     let supported_config = device.default_output_config().ok()?;
-    dbg!(&supported_config);
-
     let mut wavetable: Vec<f32> = vec![0.0];
     let mut pos = 0;
 
@@ -204,13 +236,13 @@ fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>))
         .build_output_stream(
             &supported_config.config(),
             move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                while let Ok(new) = rx.try_recv() {
-                    wavetable = new;
+                for out in output.iter_mut() {
+                    *out = wavetable[pos % wavetable.len()].sin().exp();
+                    pos += 1
                 }
 
-                for out in output.iter_mut() {
-                    *out = wavetable[pos % wavetable.len()];
-                    pos += 1
+                while let Ok(new) = rx.try_recv() {
+                    wavetable = new;
                 }
             },
             |err| eprintln!("{err}"),
@@ -218,13 +250,21 @@ fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>))
         )
         .ok()?;
 
-    let sonifier = move |(_step, _loss, params): &(usize, f64, Vec<f64>)| {
-        let max_abs = params
+    let sonifier = move |(_step, _loss, params): &(usize, f64, Vec<(f64, f64)>)| {
+        let selected: Vec<(f64, f64)> = param_ranges
             .iter()
-            .map(|v| v.abs())
+            .flat_map(|r| &params[r.clone()])
+            .copied()
+            .collect();
+        let max_abs = selected
+            .iter()
+            .map(|(_, v)| v.abs())
             .fold(0.0f64, f64::max)
             .max(1e-8);
-        let values: Vec<f32> = params.iter().map(|v| (v / max_abs * 0.3) as f32).collect();
+        let values: Vec<f32> = selected
+            .iter()
+            .map(|(_, v)| (v / max_abs * 0.3) as f32)
+            .collect();
         let _ = tx.send(values);
     };
 
