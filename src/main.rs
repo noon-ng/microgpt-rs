@@ -191,7 +191,9 @@ fn train(args: &Args) -> Model {
     model
 }
 
-fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>)))> {
+type Sonification = (cpal::Stream, Box<dyn FnMut(&(usize, f64, Vec<f64>))>);
+
+fn setup_sonifier() -> Option<Sonification> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let device = cpal::default_host().default_output_device()?;
     let supported_config = device.default_output_config().ok()?;
@@ -230,7 +232,7 @@ fn setup_sonifier() -> Option<(cpal::Stream, impl FnMut(&(usize, f64, Vec<f64>))
 
     stream.play().unwrap();
 
-    Some((stream, sonifier))
+    Some((stream, Box::new(sonifier)))
 }
 
 fn import_training_set(filename: &str) -> (Vec<String>, Vec<char>) {
