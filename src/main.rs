@@ -48,9 +48,10 @@ struct Args {
     #[arg(long, default_value_t = 4, value_parser = clap::value_parser!(usize))]
     heads: usize,
 
-    // Sonify training steps
-    #[arg(long, default_value_t = false)]
-    sonify: bool,
+    // Sonify training steps with raw contents of network. Accepts a comma-separated list of network
+    // blocks to feed to the default sound output. By default `lm_head`.
+    #[arg(long, default_missing_value = "lm_head", num_args=0..=1, value_delimiter = ',')]
+    sonify: Vec<String>,
 }
 
 impl Args {
@@ -123,7 +124,7 @@ fn main() {
             println!("loading checkpoint from {}", path);
             let model = Model::load(path).expect("failed to load checkpoint");
             println!("vocab size: {}", model.vocab_size());
-            println!("num params: {}", model.params().len());
+            println!("num params: {}", model.all_params().len());
             model
         } else {
             let model = train(&args);
@@ -162,9 +163,13 @@ fn train(args: &Args) -> Model {
         args.heads,
     );
     println!("vocab size: {}", model.vocab_size());
-    println!("num params: {}", model.params().len());
+    println!("num params: {}", model.all_params().len());
 
-    let mut sonification = args.sonify.then(setup_sonifier).flatten();
+    let sonification = if args.sonify.is_empty() {
+        None
+    } else {
+        setup_sonifier(args.sonify.clone())
+    };
 
     let steps = args.steps;
 
@@ -175,8 +180,8 @@ fn train(args: &Args) -> Model {
             std::io::stdout().flush().unwrap();
         })
         .inspect(|step_data| {
-            if let Some((_, sonify)) = &mut sonification {
-                sonify(step_data);
+            if let Some((_, sonify)) = &sonification {
+                sonify(step_data)
             }
         })
         .map_while(|_| {
@@ -191,13 +196,12 @@ fn train(args: &Args) -> Model {
     model
 }
 
-type Sonification = (cpal::Stream, Box<dyn FnMut(&(usize, f64, Vec<f64>))>);
+type Sonification = (cpal::Stream, Box<dyn Fn(&(usize, f64, &Model))>);
 
-fn setup_sonifier() -> Option<Sonification> {
+fn setup_sonifier(filter: Vec<String>) -> Option<Sonification> {
     let (tx, rx) = std::sync::mpsc::channel::<Vec<f32>>();
     let device = cpal::default_host().default_output_device()?;
     let supported_config = device.default_output_config().ok()?;
-    dbg!(&supported_config);
 
     let mut wavetable: Vec<f32> = vec![0.0];
     let mut pos = 0;
@@ -220,13 +224,17 @@ fn setup_sonifier() -> Option<Sonification> {
         )
         .ok()?;
 
-    let sonifier = move |(_step, _loss, params): &(usize, f64, Vec<f64>)| {
+    let sonifier = move |(_step, _loss, model): &(usize, f64, &Model)| {
+        let params = model.params_for(&filter);
         let max_abs = params
             .iter()
-            .map(|v| v.abs())
+            .map(|param| param.data().abs())
             .fold(0.0f64, f64::max)
             .max(1e-8);
-        let values: Vec<f32> = params.iter().map(|v| (v / max_abs * 0.3) as f32).collect();
+        let values: Vec<f32> = params
+            .iter()
+            .map(|param| (param.data() / max_abs * 0.3) as f32)
+            .collect();
         let _ = tx.send(values);
     };
 

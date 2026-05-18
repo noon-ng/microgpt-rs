@@ -105,10 +105,25 @@ impl Model {
         }
     }
 
-    pub fn params(&self) -> Vec<Value> {
+    pub fn all_params(&self) -> Vec<Value> {
         self.network
             .values()
-            .flat_map(|m| m.iter().flatten())
+            .flat_map(|block| block.iter().flatten())
+            .cloned()
+            .collect()
+    }
+
+    pub fn params_for(&self, patterns: &[String]) -> Vec<Value> {
+        use wildmatch::WildMatch;
+
+        self.network
+            .iter()
+            .filter(|(block_name, _)| {
+                patterns
+                    .iter()
+                    .any(|pattern| WildMatch::new(pattern).matches(block_name))
+            })
+            .flat_map(|(_, block)| block.iter().flatten())
             .cloned()
             .collect()
     }
@@ -125,8 +140,8 @@ impl Model {
         &self,
         steps: usize,
         documents: Vec<String>,
-    ) -> impl Iterator<Item = (usize, f64, Vec<f64>)> {
-        let mut params: Vec<Value> = self.params();
+    ) -> impl Iterator<Item = (usize, f64, &Model)> {
+        let mut params: Vec<Value> = self.all_params();
         let mut m = vec![0.0; params.len()];
         let mut v = vec![0.0; params.len()];
         let learning_rate = 0.01;
@@ -181,8 +196,7 @@ impl Model {
                 param.reset_grad();
             });
 
-            let param_values: Vec<f64> = params.iter().map(|p| p.data()).collect();
-            (step, loss.data(), param_values)
+            (step, loss.data(), self)
         })
     }
 
@@ -404,7 +418,7 @@ impl Model {
                 layers: self.layers,
                 embeddings: self.embeddings,
                 heads: self.heads,
-                params: self.params().iter().map(|v| v.data()).collect(),
+                params: self.all_params().iter().map(|v| v.data()).collect(),
             })
             .unwrap(),
         )
@@ -423,7 +437,7 @@ impl Model {
         );
 
         model
-            .params()
+            .all_params()
             .into_iter()
             .zip(checkpoint.params)
             .for_each(|(mut param, value)| param.set_data(value));
